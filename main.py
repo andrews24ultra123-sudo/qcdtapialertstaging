@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import logging
@@ -20,9 +21,7 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-# ✅ Keep token in Railway Variables (recommended)
-# Railway → Variables: BOT_TOKEN=xxxxx
-import os
+# ✅ Put BOT_TOKEN in Railway Variables: BOT_TOKEN=xxxxx
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT_ID = -5299275232
 
@@ -37,12 +36,12 @@ SGT_PYTZ = pytz.timezone("Asia/Singapore")  # for PTB JobQueue Defaults
 HOLIDAY_TIME = dtime(16, 45)     # 4:45pm SGT
 REMINDER_TIME = dtime(17, 30)    # 5:30pm SGT
 
-# ✅ NAG window updated: 5:15pm → 9:00pm SGT
-NAG_START = dtime(17, 15)        # 5:15pm SGT
+# ✅ NAG window updated: 5:30pm → 9:00pm SGT
+NAG_START = dtime(17, 30)        # 5:30pm SGT (kickoff exactly at this time)
 NAG_END = dtime(21, 0)           # 9:00pm SGT
+NAG_EVERY_MIN = 5                # nag every 5 min
 
 CHECK_EVERY_MIN = 2              # check API every 2 min
-NAG_EVERY_MIN = 5                # ✅ nag every 5 min
 
 TAG_LINE = "@mrpotato1234 please cross ref QCDT price to NAV pack email"
 CC_LINE = "CC: @Nathan_DMZ @LEEKAIYANG @Duke_RWAlpha @AscentHamza @Ascentkaiwei"
@@ -178,7 +177,7 @@ async def check_price(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(dt):
         return
 
-    # keep same "meaningful hours" gate as before
+    # keep same "meaningful hours" gate (unchanged)
     if not within_time_window(dt.time(), dtime(15, 0), dtime(21, 0)):
         return
 
@@ -221,7 +220,7 @@ def build_ack_message(payload: dict) -> str:
     )
 
 # =========================
-# NAGGING (5:15pm–9:00pm if not updated)
+# NAGGING (5:30pm–9:00pm if not updated)
 # =========================
 async def nag_poll(ctx: ContextTypes.DEFAULT_TYPE):
     if state["stop_all"] or state["stop_nags"] or state["update_detected"]:
@@ -241,6 +240,10 @@ async def nag_poll(ctx: ContextTypes.DEFAULT_TYPE):
     )
     if poll:
         state["pending_nag_poll_id"] = poll.poll.id
+
+# ✅ Kickoff nag exactly at 5:30pm (then repeats every 5 minutes via run_repeating)
+async def nag_kickoff(ctx: ContextTypes.DEFAULT_TYPE):
+    await nag_poll(ctx)
 
 # =========================
 # SCHEDULED JOBS
@@ -337,6 +340,7 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing. Set it in Railway Variables.")
 
+    # Defaults tzinfo makes JobQueue run_daily interpret times in SGT
     defaults = Defaults(tzinfo=SGT_PYTZ)
 
     app = (
@@ -363,7 +367,10 @@ def main():
     jq.run_daily(job_holiday_summary, time=HOLIDAY_TIME, days=weekdays, name="holiday_1645")
     jq.run_daily(job_portal_reminder, time=REMINDER_TIME, days=weekdays, name="reminder_1730")
 
-    # Repeating nags (every 5 minutes, but only sends within 5:15pm–9:00pm)
+    # ✅ Kickoff nag exactly at 5:30pm SGT
+    jq.run_daily(nag_kickoff, time=NAG_START, days=weekdays, name="nag_kickoff_1730")
+
+    # Repeating nags every 5 minutes (will only send within 5:30pm–9:00pm)
     jq.run_repeating(nag_poll, interval=NAG_EVERY_MIN * 60, first=60, name="nag_repeat_5m")
 
     # Price check repeating every 2 minutes
