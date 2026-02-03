@@ -1,13 +1,35 @@
+# =========================================================
+# BOOTSTRAP (Railway-safe): ensure deps exist before imports
+# =========================================================
+import sys
+import subprocess
+
+REQUIRED = [
+    "python-telegram-bot[job-queue]==20.7",
+    "httpx==0.25.2",
+    "pytz",
+    "APScheduler==3.10.4",
+]
+
+def _ensure():
+    # Best-effort: if already installed, pip will be fast/no-op
+    subprocess.check_call([sys.executable, "-m", "pip", "install", *REQUIRED])
+
+try:
+    _ensure()
+except Exception:
+    # If pip install fails, let the normal import error show up
+    pass
+
+# =========================================================
+# NORMAL IMPORTS
+# =========================================================
 import os
 import asyncio
 import json
 import logging
 from datetime import datetime, time as dtime, timedelta, date
 from zoneinfo import ZoneInfo
-
-import sys, subprocess
-subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "python-telegram-bot[job-queue]==20.7", "pytz", "APScheduler"])
-
 
 import httpx
 import pytz
@@ -25,8 +47,7 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-# ✅ Put BOT_TOKEN in Railway Variables: BOT_TOKEN=xxxxx
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = -5299275232
 
 # ✅ UAT endpoint
@@ -34,23 +55,22 @@ API_URL = "https://uat.dmz.finance/stores/tdd/qcdt/new_price"
 
 # Timezone
 TZINFO = ZoneInfo("Asia/Singapore")
-SGT_PYTZ = pytz.timezone("Asia/Singapore")  # for PTB JobQueue Defaults
+SGT_PYTZ = pytz.timezone("Asia/Singapore")
 
 # Weekday schedules (SGT)
-HOLIDAY_TIME = dtime(16, 45)     # 4:45pm SGT
-REMINDER_TIME = dtime(17, 30)    # 5:30pm SGT
+HOLIDAY_TIME = dtime(16, 45)     # 4:45pm
+REMINDER_TIME = dtime(17, 30)    # 5:30pm
 
-# ✅ NAG window updated: 5:30pm → 9:00pm SGT
-NAG_START = dtime(17, 30)        # 5:30pm SGT (kickoff exactly at this time)
-NAG_END = dtime(21, 0)           # 9:00pm SGT
-NAG_EVERY_MIN = 5                # nag every 5 min
+# ✅ NAG window: 5:30pm → 9:00pm
+NAG_START = dtime(17, 30)        # kickoff exactly at 5:30pm
+NAG_END = dtime(21, 0)           # 9:00pm
+NAG_EVERY_MIN = 5                # every 5 min
 
-CHECK_EVERY_MIN = 2              # check API every 2 min
+CHECK_EVERY_MIN = 2              # price polling
 
 TAG_LINE = "@mrpotato1234 please cross ref QCDT price to NAV pack email"
 CC_LINE = "CC: @Nathan_DMZ @LEEKAIYANG @Duke_RWAlpha @AscentHamza @Ascentkaiwei"
 DAILY_REMINDER = "📝 Ascent, please remember to update QCDT price on the portal."
-
 HOLIDAY_API = "https://date.nager.at/api/v3/PublicHolidays"
 
 HTTP_TIMEOUT_SECONDS = 15
@@ -63,13 +83,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # =========================
 state = {
     "last_seen_update_time": None,
-    "update_detected": False,            # True once we detect today’s update_time change
-    "stop_all": False,                   # True after update-action poll selection
-    "stop_nags": False,                  # True if user selects Public holiday on nag poll
+    "update_detected": False,
+    "stop_all": False,
+    "stop_nags": False,
     "pending_update_payload": None,
     "pending_update_poll_id": None,
     "pending_nag_poll_id": None,
-    "last_error_at": None,               # datetime in SGT
+    "last_error_at": None,
 }
 
 # =========================
@@ -181,7 +201,7 @@ async def check_price(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_weekday(dt):
         return
 
-    # keep same "meaningful hours" gate (unchanged)
+    # same "meaningful hours" gate
     if not within_time_window(dt.time(), dtime(15, 0), dtime(21, 0)):
         return
 
@@ -245,7 +265,7 @@ async def nag_poll(ctx: ContextTypes.DEFAULT_TYPE):
     if poll:
         state["pending_nag_poll_id"] = poll.poll.id
 
-# ✅ Kickoff nag exactly at 5:30pm (then repeats every 5 minutes via run_repeating)
+# ✅ Kickoff nag exactly at 5:30pm
 async def nag_kickoff(ctx: ContextTypes.DEFAULT_TYPE):
     await nag_poll(ctx)
 
@@ -253,17 +273,12 @@ async def nag_kickoff(ctx: ContextTypes.DEFAULT_TYPE):
 # SCHEDULED JOBS
 # =========================
 async def job_holiday_summary(ctx: ContextTypes.DEFAULT_TYPE):
-    if state["stop_all"]:
+    if state["stop_all"] or not is_weekday():
         return
-    if not is_weekday():
-        return
-    msg = await holiday_summary_this_week()
-    await safe_send(ctx, msg)
+    await safe_send(ctx, await holiday_summary_this_week())
 
 async def job_portal_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    if state["stop_all"]:
-        return
-    if not is_weekday():
+    if state["stop_all"] or not is_weekday():
         return
     await safe_send(ctx, DAILY_REMINDER)
 
@@ -289,11 +304,11 @@ async def on_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     poll_id = pa.poll_id
     choice = pa.option_ids[0]
 
-    # Update-detected poll: ANY choice stops everything for the day
+    # Update-detected poll: any choice stops all
     if poll_id == state["pending_update_poll_id"]:
         state["stop_all"] = True
-
         payload = state["pending_update_payload"]
+
         if choice == 0 and payload:
             await safe_send(ctx, build_ack_message(payload))
         elif choice == 1:
@@ -304,9 +319,8 @@ async def on_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_send(ctx, "Noted. Monitoring stopped for today.")
         return
 
-    # Nag poll: Public holiday stops nags
+    # Nag poll: public holiday stops nags
     if poll_id == state["pending_nag_poll_id"]:
-        # options: 0=Investigating, 1=Public holiday
         if choice == 1:
             state["stop_nags"] = True
             await safe_send(ctx, "🎌 Public holiday noted. Nag reminders stopped for today.")
@@ -336,15 +350,15 @@ async def post_init(app):
             text=f"✅ QCDT bot online at {now_sgt():%a %d %b %Y %H:%M} (SGT)",
         )
     except Forbidden:
-        logging.error("Startup message blocked (Forbidden). Bot not in group / no permission.")
+        logging.error("Startup message blocked (Forbidden).")
     except Exception as e:
         logging.error("Startup message failed: %s", e)
 
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN missing. Set it in Railway Variables.")
+        logging.error("BOT_TOKEN missing. Set Railway Variables: BOT_TOKEN=xxxxx")
+        return
 
-    # Defaults tzinfo makes JobQueue run_daily interpret times in SGT
     defaults = Defaults(tzinfo=SGT_PYTZ)
 
     app = (
@@ -360,28 +374,25 @@ def main():
 
     jq = app.job_queue
     if jq is None:
-        raise RuntimeError("JobQueue missing. Install python-telegram-bot[job-queue]==20.7")
+        logging.error("JobQueue missing. Install python-telegram-bot[job-queue]==20.7")
+        return
 
-    weekdays = (0, 1, 2, 3, 4)  # Mon-Fri
+    weekdays = (0, 1, 2, 3, 4)
 
-    # Daily reset
     jq.run_daily(daily_reset, time=dtime(0, 1), name="daily_reset")
-
-    # Scheduled notices (SGT)
     jq.run_daily(job_holiday_summary, time=HOLIDAY_TIME, days=weekdays, name="holiday_1645")
     jq.run_daily(job_portal_reminder, time=REMINDER_TIME, days=weekdays, name="reminder_1730")
 
-    # ✅ Kickoff nag exactly at 5:30pm SGT
+    # ✅ exact 5:30pm kickoff nag
     jq.run_daily(nag_kickoff, time=NAG_START, days=weekdays, name="nag_kickoff_1730")
 
-    # Repeating nags every 5 minutes (will only send within 5:30pm–9:00pm)
+    # ✅ repeating nags every 5 min (only sends within 5:30pm–9:00pm)
     jq.run_repeating(nag_poll, interval=NAG_EVERY_MIN * 60, first=60, name="nag_repeat_5m")
 
-    # Price check repeating every 2 minutes
+    # price check repeating every 2 min
     jq.run_repeating(check_price, interval=CHECK_EVERY_MIN * 60, first=10, name="price_check_2m")
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
