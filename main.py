@@ -47,7 +47,7 @@ from telegram.ext import (
 # =========================
 BOT_TOKEN = "8353492721:AAHTzmPHAAOF-7ihhFCiTT7B339MnhQnScU"
 CHAT_ID = -5299275232
-API_URL = "https://www.dmz.finance/stores/tdd/qcdt/new_price"
+API_URL = "https://uat.dmz.finance/stores/tdd/qcdt/new_price"
 
 TZINFO = ZoneInfo("Asia/Singapore")
 SGT_PYTZ = pytz.timezone("Asia/Singapore")
@@ -198,3 +198,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
