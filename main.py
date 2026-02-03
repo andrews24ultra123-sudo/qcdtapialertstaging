@@ -1,3 +1,28 @@
+# =========================================================
+# BOOTSTRAP DEPENDENCIES (Railway-safe)
+# =========================================================
+import sys
+import subprocess
+
+REQUIRED_PACKAGES = [
+    "httpx==0.25.2",
+    "python-telegram-bot[job-queue]==20.7",
+    "pytz",
+    "APScheduler==3.10.4",
+]
+
+def ensure_packages():
+    for pkg in REQUIRED_PACKAGES:
+        try:
+            __import__(pkg.split("[")[0].split("==")[0])
+        except Exception:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+
+ensure_packages()
+
+# =========================================================
+# NORMAL IMPORTS (safe now)
+# =========================================================
 import os
 import json
 import logging
@@ -23,23 +48,19 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = -5299275232
 
-# UAT endpoint
 API_URL = "https://uat.dmz.finance/stores/tdd/qcdt/new_price"
 
-# Timezone
 TZINFO = ZoneInfo("Asia/Singapore")
 SGT_PYTZ = pytz.timezone("Asia/Singapore")
 
-# Weekday schedules (SGT)
-HOLIDAY_TIME = dtime(16, 45)     # 4:45pm
-REMINDER_TIME = dtime(17, 30)    # 5:30pm
+HOLIDAY_TIME = dtime(16, 45)
+REMINDER_TIME = dtime(17, 30)
 
-# Nag window + cadence
-NAG_START = dtime(17, 30)        # 5:30pm (kickoff)
-NAG_END = dtime(21, 0)           # 9:00pm
-NAG_EVERY_MIN = 5                # every 5 min
+NAG_START = dtime(17, 30)   # exact kickoff
+NAG_END = dtime(21, 0)
+NAG_EVERY_MIN = 5
 
-CHECK_EVERY_MIN = 2              # price polling
+CHECK_EVERY_MIN = 2
 
 TAG_LINE = "@mrpotato1234 please cross ref QCDT price to NAV pack email"
 CC_LINE = "CC: @Nathan_DMZ @LEEKAIYANG @Duke_RWAlpha @AscentHamza @Ascentkaiwei"
@@ -52,7 +73,7 @@ ERROR_COOLDOWN = timedelta(minutes=60)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # =========================
-# STATE (resets daily)
+# STATE
 # =========================
 state = {
     "last_seen_update_time": None,
@@ -68,44 +89,42 @@ state = {
 # =========================
 # TIME HELPERS
 # =========================
-def now_sgt() -> datetime:
+def now_sgt():
     return datetime.now(TZINFO)
 
-def today_str() -> str:
+def today_str():
     return now_sgt().strftime("%Y-%m-%d")
 
-def is_weekday(dt: datetime | None = None) -> bool:
+def is_weekday(dt=None):
     dt = dt or now_sgt()
     return dt.weekday() < 5
 
-def pretty_today() -> str:
+def pretty_today():
     return now_sgt().strftime("%d %b %Y").lstrip("0")
 
-def pretty_date_yyyy_mm_dd(s: str) -> str:
+def pretty_date_yyyy_mm_dd(s):
     d = datetime.strptime(s, "%Y-%m-%d").date()
     return d.strftime("%d %b %Y").lstrip("0")
 
-def should_send_error() -> bool:
+def should_send_error():
     last = state["last_error_at"]
     return last is None or (now_sgt() - last) >= ERROR_COOLDOWN
 
-def within_time_window(now_t: dtime, start: dtime, end: dtime) -> bool:
+def within_time_window(now_t, start, end):
     return start <= now_t <= end
 
 # =========================
-# TELEGRAM HELPERS (Context)
+# TELEGRAM HELPERS
 # =========================
-async def safe_send(ctx: ContextTypes.DEFAULT_TYPE, text: str, mode=None):
+async def safe_send(bot, text, mode=None):
     try:
-        await ctx.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=mode)
-    except Forbidden:
-        logging.error("Forbidden: bot lacks permission in group.")
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=mode)
     except Exception as e:
         logging.error("Send failed: %s", e)
 
-async def safe_send_poll(ctx: ContextTypes.DEFAULT_TYPE, question: str, options: list[str]):
+async def safe_poll(bot, question, options):
     try:
-        return await ctx.bot.send_poll(
+        return await bot.send_poll(
             chat_id=CHAT_ID,
             question=question,
             options=options,
@@ -114,85 +133,27 @@ async def safe_send_poll(ctx: ContextTypes.DEFAULT_TYPE, question: str, options:
     except Exception as e:
         logging.error("Poll failed: %s", e)
         return None
-
-# =========================
-# TELEGRAM HELPERS (Application) – for startup nag
-# =========================
-async def safe_send_app(app, text: str, mode=None):
-    try:
-        await app.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=mode)
-    except Forbidden:
-        logging.error("Forbidden: bot lacks permission in group.")
-    except Exception as e:
-        logging.error("Send failed: %s", e)
-
-async def safe_send_poll_app(app, question: str, options: list[str]):
-    try:
-        return await app.bot.send_poll(
-            chat_id=CHAT_ID,
-            question=question,
-            options=options,
-            is_anonymous=False,
-        )
-    except Exception as e:
-        logging.error("Poll failed: %s", e)
-        return None
-
-# =========================
-# HOLIDAY SUMMARY
-# =========================
-async def holiday_summary_this_week() -> str:
-    today = now_sgt().date()
-    year = today.year
-    lines = [f"📅 Public Holidays (SG / UAE) — Week of {today:%d %b %Y}"]
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        for label, code in [("Singapore", "SG"), ("UAE", "AE")]:
-            try:
-                r = await client.get(f"{HOLIDAY_API}/{year}/{code}")
-                data = r.json() if r.status_code == 200 else []
-            except Exception:
-                data = []
-
-            found = []
-            for h in data:
-                try:
-                    hd = date.fromisoformat(h.get("date", ""))
-                except Exception:
-                    continue
-                if abs((hd - today).days) <= 7:
-                    found.append(f"  - {hd:%a %d %b}: {h.get('name') or h.get('localName')}")
-
-            lines.append(f"\n• {label}:")
-            lines.extend(found or ["  - None"])
-
-    return "\n".join(lines)
 
 # =========================
 # API
 # =========================
-async def fetch_payload() -> dict:
+async def fetch_payload():
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
         r = await client.get(API_URL)
         r.raise_for_status()
         return r.json()
 
-def parse_update_time_sgt(s: str) -> datetime:
+def parse_update_time_sgt(s):
     return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZINFO)
 
 # =========================
-# PRICE CHECK
+# JOBS
 # =========================
-async def check_price(ctx: ContextTypes.DEFAULT_TYPE):
-    if state["stop_all"]:
+async def check_price(ctx):
+    if state["stop_all"] or not is_weekday():
         return
 
-    dt = now_sgt()
-    if not is_weekday(dt):
-        return
-
-    # meaningful hours gate (unchanged)
-    if not within_time_window(dt.time(), dtime(15, 0), dtime(21, 0)):
+    if not within_time_window(now_sgt().time(), dtime(15, 0), dtime(21, 0)):
         return
 
     try:
@@ -207,11 +168,11 @@ async def check_price(ctx: ContextTypes.DEFAULT_TYPE):
             state["update_detected"] = True
             state["pending_update_payload"] = payload
 
-            await safe_send(ctx, f"<pre>{json.dumps(payload, ensure_ascii=False)}</pre>", ParseMode.HTML)
-            await safe_send(ctx, TAG_LINE)
+            await safe_send(ctx.bot, f"<pre>{json.dumps(payload, ensure_ascii=False)}</pre>", ParseMode.HTML)
+            await safe_send(ctx.bot, TAG_LINE)
 
-            poll = await safe_send_poll(
-                ctx,
+            poll = await safe_poll(
+                ctx.bot,
                 "QCDT price update detected. Action?",
                 ["✅ Acknowledge", "🕵️ Investigating / Dispute", "🎌 Public holiday"],
             )
@@ -221,129 +182,72 @@ async def check_price(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         if should_send_error():
             state["last_error_at"] = now_sgt()
-            await safe_send(ctx, f"⚠️ Error:\n<pre>{e}</pre>", ParseMode.HTML)
+            await safe_send(ctx.bot, f"⚠️ Error:\n<pre>{e}</pre>", ParseMode.HTML)
 
-def build_ack_message(payload: dict) -> str:
-    d = payload["data"]
-    return (
-        f"Updated today on {pretty_today()} for {pretty_date_yyyy_mm_dd(d['price_date'])} QCDT price. "
-        f"Price of {d['price']} tallies with NAV report. {CC_LINE}"
-    )
-
-# =========================
-# NAGGING
-# =========================
-async def nag_poll(ctx: ContextTypes.DEFAULT_TYPE):
+async def nag_poll(ctx):
     if state["stop_all"] or state["stop_nags"] or state["update_detected"]:
         return
 
-    dt = now_sgt()
-    if not is_weekday(dt):
+    if not is_weekday():
         return
 
-    if not within_time_window(dt.time(), NAG_START, NAG_END):
+    if not within_time_window(now_sgt().time(), NAG_START, NAG_END):
         return
 
-    poll = await safe_send_poll(
-        ctx,
+    poll = await safe_poll(
+        ctx.bot,
         "⚠️ QCDT price not updated yet. Action?",
         ["🕵️ Investigating / Dispute", "🎌 Public holiday"],
     )
     if poll:
         state["pending_nag_poll_id"] = poll.poll.id
 
-async def nag_kickoff(ctx: ContextTypes.DEFAULT_TYPE):
+async def nag_kickoff(ctx):
     await nag_poll(ctx)
-
-# =========================
-# DAILY JOBS
-# =========================
-async def job_holiday_summary(ctx):
-    if is_weekday() and not state["stop_all"]:
-        await safe_send(ctx, await holiday_summary_this_week())
-
-async def job_portal_reminder(ctx):
-    if is_weekday() and not state["stop_all"]:
-        await safe_send(ctx, DAILY_REMINDER)
 
 async def daily_reset(ctx):
     for k in state:
         state[k] = False if isinstance(state[k], bool) else None
-    await safe_send(ctx, "🔄 QCDT bot daily reset (SGT).")
+    await safe_send(ctx.bot, "🔄 QCDT bot daily reset (SGT).")
 
 # =========================
-# POLL ANSWERS
+# POLL HANDLER
 # =========================
 async def on_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pa = update.poll_answer
     if not pa or not pa.option_ids:
         return
 
-    # Update-detected poll
     if pa.poll_id == state["pending_update_poll_id"]:
         state["stop_all"] = True
         payload = state["pending_update_payload"]
-
-        if pa.option_ids[0] == 0:
-            await safe_send(ctx, build_ack_message(payload))
-        elif pa.option_ids[0] == 1:
-            await safe_send(ctx, "🕵️ Investigating / Dispute. Monitoring stopped for today.")
-        else:
-            await safe_send(ctx, "🎌 Public holiday. Monitoring stopped for today.")
+        await safe_send(ctx.bot, f"Updated today on {pretty_today()} for {pretty_date_yyyy_mm_dd(payload['data']['price_date'])}. {CC_LINE}")
         return
 
-    # Nag poll
-    if pa.poll_id == state["pending_nag_poll_id"]:
-        if pa.option_ids[0] == 1:
-            state["stop_nags"] = True
-            await safe_send(ctx, "🎌 Public holiday noted. Nagging stopped for today.")
-        else:
-            await safe_send(ctx, "🕵️ Noted: Investigating / Dispute.")
-
-# =========================
-# COMMANDS
-# =========================
-async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    try:
-        payload = await fetch_payload()
-        await update.message.reply_text(
-            f"<pre>{json.dumps(payload, ensure_ascii=False)}</pre>",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ /status failed: {e}")
+    if pa.poll_id == state["pending_nag_poll_id"] and pa.option_ids[0] == 1:
+        state["stop_nags"] = True
+        await safe_send(ctx.bot, "🎌 Public holiday noted. Nagging stopped.")
 
 # =========================
 # STARTUP
 # =========================
 async def post_init(app):
-    # startup message
-    try:
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"✅ QCDT bot online at {now_sgt():%a %d %b %Y %H:%M} (SGT)",
-        )
-    except Exception as e:
-        logging.error("Startup message failed: %s", e)
+    await safe_send(app.bot, f"✅ QCDT bot online at {now_sgt():%a %d %b %Y %H:%M} (SGT)")
 
-    # ✅ IMPORTANT: if bot restarts during nag window, send a nag immediately
-    try:
-        dt = now_sgt()
-        if is_weekday(dt) and within_time_window(dt.time(), NAG_START, NAG_END):
-            if (not state["stop_all"]) and (not state["stop_nags"]) and (not state["update_detected"]):
-                poll = await safe_send_poll_app(
-                    app,
-                    "⚠️ QCDT price not updated yet. Action?",
-                    ["🕵️ Investigating / Dispute", "🎌 Public holiday"],
-                )
-                if poll:
-                    state["pending_nag_poll_id"] = poll.poll.id
-    except Exception as e:
-        logging.error("Startup nag kickoff failed: %s", e)
+    # restart-resume nag
+    if is_weekday() and within_time_window(now_sgt().time(), NAG_START, NAG_END):
+        if not state["update_detected"] and not state["stop_nags"]:
+            poll = await safe_poll(
+                app.bot,
+                "⚠️ QCDT price not updated yet. Action?",
+                ["🕵️ Investigating / Dispute", "🎌 Public holiday"],
+            )
+            if poll:
+                state["pending_nag_poll_id"] = poll.poll.id
 
 def main():
     if not BOT_TOKEN:
-        logging.error("BOT_TOKEN missing in environment.")
+        logging.error("BOT_TOKEN missing")
         return
 
     defaults = Defaults(tzinfo=SGT_PYTZ)
@@ -357,23 +261,12 @@ def main():
     )
 
     app.add_handler(PollAnswerHandler(on_poll_answer))
-    app.add_handler(CommandHandler("status", status_cmd))
 
     jq = app.job_queue
-    weekdays = (0, 1, 2, 3, 4)
-
-    jq.run_daily(daily_reset, time=dtime(0, 1), name="daily_reset")
-    jq.run_daily(job_holiday_summary, time=HOLIDAY_TIME, days=weekdays, name="holiday_1645")
-    jq.run_daily(job_portal_reminder, time=REMINDER_TIME, days=weekdays, name="reminder_1730")
-
-    # exact 5:30pm kickoff nag
-    jq.run_daily(nag_kickoff, time=NAG_START, days=weekdays, name="nag_kickoff_1730")
-
-    # repeating nags every 5 min (will only send within 5:30pm–9:00pm)
-    jq.run_repeating(nag_poll, interval=NAG_EVERY_MIN * 60, first=60, name="nag_repeat_5m")
-
-    # price check repeating every 2 min
-    jq.run_repeating(check_price, interval=CHECK_EVERY_MIN * 60, first=10, name="price_check_2m")
+    jq.run_daily(daily_reset, time=dtime(0, 1))
+    jq.run_daily(nag_kickoff, time=NAG_START, days=(0,1,2,3,4))
+    jq.run_repeating(nag_poll, interval=NAG_EVERY_MIN * 60, first=60)
+    jq.run_repeating(check_price, interval=CHECK_EVERY_MIN * 60, first=10)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
