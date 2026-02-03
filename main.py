@@ -5,6 +5,10 @@ import logging
 from datetime import datetime, time as dtime, timedelta, date
 from zoneinfo import ZoneInfo
 
+import sys, subprocess
+subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "python-telegram-bot[job-queue]==20.7", "pytz", "APScheduler"])
+
+
 import httpx
 import pytz
 from telegram import Update
@@ -380,3 +384,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
